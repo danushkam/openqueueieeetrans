@@ -1,0 +1,12 @@
+/**
+ * Created by danushka on 2/25/17.
+ */
+public enum RoutineType {
+    UNDEFINED,
+    QUEUE_SELECTOR,
+    CONGESTION_CONDITION,
+    CONGESTION_ACTION,
+    ADMISSION_PRIORITY,
+    PROCESSING_PRIORITY,
+    SCHEDULING_PRIORITY
+}
