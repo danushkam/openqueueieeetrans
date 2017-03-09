@@ -1,16 +1,24 @@
+/*
+ * OQGen	    Main class that drives the whole code generation operation.
+ *
+ *              This program is free software; you can redistribute it and/or
+ *              modify it under the terms of the GNU General Public License
+ *              as published by the Free Software Foundation; either version
+ *              2 of the License, or (at your option) any later version.
+ *
+ * Authors:     Danushka Menikkumbura, <dmenikku@purdue.edu>
+ */
+
 import java.io.*;
 import java.util.Map;
 import java.util.HashMap;
 
-/**
- * Created by danushka on 2/20/17.
- */
 public class OQGen {
-    private static final String OQ_QSEL_FUNC = "@oq_qsel_func";
     private static final String OQ_CONG_FUNC = "@oq_cong_func";
     private static final String OQ_CONG_ACT_FUNC = "@oq_cong_act_func";
     private static final String OQ_ADMN_FUNC = "@oq_admn_func";
     private static final String OQ_PROC_FUNC = "@oq_proc_func";
+    private static final String OQ_QSEL_FUNC = "@oq_qsel_func";
     private static final String OQ_SCHD_FUNC = "@oq_schd_func";
 
     private Map<String, Routine> routines = new HashMap<>();
@@ -46,27 +54,6 @@ public class OQGen {
         if (!oqGen.generateCode()) {
             showError("Error while generating code for file: " + args[0], 0);
         }
-    }
-
-    /**
-     * Check if the policy is well-defined
-     *
-     * @return True if well-defined false otherwise
-     */
-    private boolean isWellDefined() {
-        if (port == null || !port.isWellDefined()) {
-            showError("Port not well-defined", 0);
-            return false;
-        }
-
-        for (Queue queue : queues.values()) {
-            if (!queue.isWellDefined()) {
-                showError("Queue not well-defined: " + queue.getName(), 0);
-                return false;
-            }
-        }
-
-        return true;
     }
 
     /**
@@ -122,14 +109,14 @@ public class OQGen {
                             return false;
                         }
                     } else {
-                        String[] tokens = line.split(" ");
-                        if (tokens.length != 3) {
+                        String[] tokens = line.split(" = ");
+                        if (tokens.length != 2) {
                             showError("Invalid assignment statement: " + line, lineNumber);
                             return false;
                         }
 
-                        String lhs = tokens[0];
-                        String rhs = tokens[2];
+                        String lhs = tokens[0].trim();
+                        String rhs = tokens[1].trim();
                         rhs = rhs.replace(';', ' ').trim();
 
                         tokens = lhs.split("\\.");
@@ -141,8 +128,9 @@ public class OQGen {
                         String objName = tokens[0];
                         String attr = tokens[1];
                         Queue queue;
+
                         if ((queue = queues.get(objName)) != null) { // Queue
-                             if (attr.equals("congestion")) {
+                            if (attr.equals("congestion")) {
                                 if (!validateFunctionAssignment(queue, rhs, RoutineType.CONGESTION_CONDITION)) {
                                     showError("Invalid function assignment: " + line, lineNumber);
                                     return false;
@@ -200,6 +188,27 @@ public class OQGen {
     }
 
     /**
+     * Check if the policy is well-defined
+     *
+     * @return True if well-defined false otherwise
+     */
+    private boolean isWellDefined() {
+        if (port == null || !port.isWellDefined()) {
+            showError("Port not well-defined", 0);
+            return false;
+        }
+
+        for (Queue queue : queues.values()) {
+            if (!queue.isWellDefined()) {
+                showError("Queue not well-defined: " + queue.getName(), 0);
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
      * Validate if a given funciton name is correct in terms of both name and type
      *
      * @param entity Entity the function attached to (Queue/Port)
@@ -208,10 +217,14 @@ public class OQGen {
      * @return True if it is a correct assignment or false otherwise
      */
     private boolean validateFunctionAssignment(Entity entity, String rhs, RoutineType functionType) {
-        RoutineCall routineCall;
+        Statement routineCall;
 
         if (rhs.startsWith("inline")) {
-            routineCall = null;
+            String statement = InlineStatement.validate(rhs);
+            if (statement == null)
+                return false;
+
+            routineCall = new InlineStatement(statement, functionType);
         } else {
             // Resolve function name
             String funcName = rhs;
@@ -221,26 +234,27 @@ public class OQGen {
             Routine routine = routines.get(funcName);
             if ((routine == null) || (routine.getType() != functionType))
                 return false;
-            routineCall = new RoutineCall(funcName);
+
+            routineCall = new RoutineCallStatement(funcName, functionType);
 
             // Set parameters (if any)
-            int paramCount = 0;
-            String[] paramTokens = null;
             if (rhs.contains("(") && rhs.contains(")")) {
                 String params = rhs.substring(rhs.indexOf('(') + 1, rhs.indexOf(')'));
-                paramTokens = params.trim().split(",");
-                paramCount = paramTokens.length;
-            }
+                String[] paramTokens = params.trim().split(",");
 
-            if (paramCount != routine.getParamCount())
-                return false;
+                if (paramTokens.length != 0) {
+                    double[] paramVals = new double[paramTokens.length];
 
-            if (paramCount != 0) {
-                Param[] params = getRoutineParameters(paramTokens, routine.getParamTypes());
-                if (params == null)
-                    return false;
+                    for (int i = 0; i < paramTokens.length; i++) {
+                        try {
+                            paramVals[i] = Double.parseDouble(paramTokens[i].trim());
+                        } catch (NumberFormatException e) {
+                            return false;
+                        }
+                    }
 
-                routineCall.setParams(params);
+                    ((RoutineCallStatement)routineCall).setParams(paramVals);
+                }
             }
         }
 
@@ -258,62 +272,6 @@ public class OQGen {
             ((Port) entity).setSchedPrio(routineCall);
 
         return true;
-    }
-
-    /**
-     * Deserialize routine parameters as defined in the policy
-     *
-     * @param paramTokens Arry of parameters
-     * @param paramTypes Corresponding types as per routine signature
-     * @return List of Param objects
-     */
-    private Param[] getRoutineParameters(String[] paramTokens, ParamType[] paramTypes) {
-        Param[] paramArray = new Param[paramTokens.length];
-
-        for (int i = 0; i < paramTokens.length; i++) {
-            String paramToken = paramTokens[i].trim();
-
-            switch (paramTypes[i]) {
-                case BOOL:
-                    if (!paramToken.equalsIgnoreCase("true") && !paramToken.equalsIgnoreCase("false"))
-                        return null;
-                    paramArray[i] = new Param(ParamType.BOOL, paramToken);
-                    break;
-                case CHAR:
-                    if (paramToken.length() != 3 || paramToken.charAt(0) != '\'' || paramToken.charAt(2) != '\'')
-                        return null;
-                    paramArray[i] = new Param(ParamType.CHAR, paramToken.substring(1, 2));
-                    break;
-                case INT:
-                    try {
-                        Integer.parseInt(paramToken);
-                    } catch (NumberFormatException e) {
-                        return null;
-                    }
-                    paramArray[i] = new Param(ParamType.INT, paramToken);
-                    break;
-                case LONG:
-                    try {
-                        Long.parseLong(paramToken);
-                    } catch (NumberFormatException e) {
-                        return null;
-                    }
-                    paramArray[i] = new Param(ParamType.LONG, paramToken);
-                    break;
-                case DOUBLE:
-                    try {
-                        Double.parseDouble(paramToken);
-                    } catch (NumberFormatException e) {
-                        return null;
-                    }
-                    paramArray[i] = new Param(ParamType.DOUBLE, paramToken);
-                    break;
-                default:
-                    return null;
-            }
-        }
-
-        return paramArray;
     }
 
     /**
@@ -488,6 +446,7 @@ public class OQGen {
                         showError("Function with the same name already exists: " + line, lineNumber);
                         return false;
                     }
+
                     routines.put(routine.getName(), routine);
                     nextRoutineType = RoutineType.UNDEFINED;
                 }
@@ -505,7 +464,7 @@ public class OQGen {
 
     /**
      * Check if a Queue Select function has the correct signature
-     * E.g. int select_admission_queue(struct Qdisc* sch, struct sk_buff* skb);
+     * E.g. int select_admission_queue(struct Qdisc* sch, struct sk_buff* skb, int argc, ...);
      *
      * @param line Line of code
      * @return Valid Routine instance if its correct or null otherwise
@@ -528,33 +487,36 @@ public class OQGen {
 
         String params = tokens[0];
         String[] paramTokens = params.split(",");
-        if (paramTokens.length < 2)
+        if (paramTokens.length != 4)
             return null;
 
+        // Qdisc*
         String[] param1Tokens = paramTokens[0].trim().split(" ");
         if ((param1Tokens.length != 3) || !param1Tokens[0].trim().equals("struct") ||
                 !param1Tokens[1].trim().equals("Qdisc*"))
             return null;
 
+        // sk_buff*
         String[] param2Tokens = paramTokens[1].trim().split(" ");
         if ((param2Tokens.length != 3) || !param2Tokens[0].trim().equals("struct") ||
                 !param2Tokens[1].trim().equals("sk_buff*"))
             return null;
 
-        Routine routine = new Routine(RoutineType.QUEUE_SELECTOR, funcName);
+        // Argc
+        String[] param3Tokens = paramTokens[2].trim().split(" ");
+        if ((param3Tokens.length != 2) || !param3Tokens[0].trim().equals("int"))
+            return null;
 
-        // Add additional parameters
-        if (2 < paramTokens.length) {
-            if (!validateAdditionalParameters(routine, paramTokens, 2))
-                return null;
-        }
+        // ...
+        if (!paramTokens[3].trim().equals("..."))
+            return null;
 
-        return routine;
+        return new Routine(RoutineType.QUEUE_SELECTOR, funcName);
     }
 
     /**
      * Check if a Congestion function has the correct signature
-     * E.g. bool my_congestion_condition(struct oq_queue* queue);
+     * E.g. bool my_congestion_condition(struct oq_queue* queue, int argc, ...);
      *
      * @param line Line of code
      * @return Valid Routine instance if its correct or null otherwise
@@ -577,28 +539,30 @@ public class OQGen {
 
         String params = tokens[0];
         String[] paramTokens = params.split(",");
-        if (paramTokens.length == 0)
+        if (paramTokens.length != 3)
             return null;
 
+        // oq_queue*
         String[] param1Tokens = paramTokens[0].trim().split(" ");
         if ((param1Tokens.length != 3) || !param1Tokens[0].trim().equals("struct") ||
                 !param1Tokens[1].trim().equals("oq_queue*"))
             return null;
 
-        Routine routine = new Routine(RoutineType.CONGESTION_CONDITION, funcName);
+        // Argc
+        String[] param2Tokens = paramTokens[1].trim().split(" ");
+        if ((param2Tokens.length != 2) || !param2Tokens[0].trim().equals("int"))
+            return null;
 
-        // Add additional parameters
-        if (1 < paramTokens.length) {
-            if (!validateAdditionalParameters(routine, paramTokens, 1))
-                return null;
-        }
+        // ...
+        if (!paramTokens[2].trim().equals("..."))
+            return null;
 
-        return routine;
+        return new Routine(RoutineType.CONGESTION_CONDITION, funcName);
     }
 
     /**
      * Check if a Congestion Action function has the correct signature
-     * E.g. int drop_tail(struct oq_queue* queue, struct sk_buff* skb);
+     * E.g. int drop_tail(struct oq_queue* queue, struct sk_buff* skb, int argc, ...);
      *
      * @param line Line of code
      * @return Valid Routine instance if its correct or null otherwise
@@ -621,33 +585,36 @@ public class OQGen {
 
         String params = tokens[0];
         String[] paramTokens = params.split(",");
-        if (paramTokens.length < 2)
+        if (paramTokens.length != 4)
             return null;
 
+        // oq_queue*
         String[] param1Tokens = paramTokens[0].trim().split(" ");
         if ((param1Tokens.length != 3) || !param1Tokens[0].trim().equals("struct") ||
                 !param1Tokens[1].trim().equals("oq_queue*"))
             return null;
 
+        // sk_buff*
         String[] param2Tokens = paramTokens[1].trim().split(" ");
         if ((param2Tokens.length != 3) || !param2Tokens[0].trim().equals("struct") ||
                 !param2Tokens[1].trim().equals("sk_buff*"))
             return null;
 
-        Routine routine = new Routine(RoutineType.CONGESTION_ACTION, funcName);
+        // Argc
+        String[] param3Tokens = paramTokens[2].trim().split(" ");
+        if ((param3Tokens.length != 2) || !param3Tokens[0].trim().equals("int"))
+            return null;
 
-        // Add additional parameters
-        if (2 < paramTokens.length) {
-            if (!validateAdditionalParameters(routine, paramTokens, 2))
-                return null;
-        }
+        // ...
+        if (!paramTokens[3].trim().equals("..."))
+            return null;
 
-        return routine;
+        return new Routine(RoutineType.CONGESTION_ACTION, funcName);
     }
 
     /**
      * Check if a Admission function has the correct signature
-     * E.g. unsigned long my_adm_prio(struct sk_buff* skb);
+     * E.g. unsigned long my_adm_prio(struct sk_buff* skb, int argc, ...);
      *
      * @param line Line of code
      * @return Valid Routine instance if its correct or null otherwise
@@ -671,28 +638,30 @@ public class OQGen {
 
         String params = tokens[0];
         String[] paramTokens = params.split(",");
-        if (paramTokens.length == 0)
+        if (paramTokens.length != 3)
             return null;
 
+        // sk_buff*
         String[] param1Tokens = paramTokens[0].trim().split(" ");
         if ((param1Tokens.length != 3) || !param1Tokens[0].trim().equals("struct") ||
                 !param1Tokens[1].trim().equals("sk_buff*"))
             return null;
 
-        Routine routine = new Routine(RoutineType.ADMISSION_PRIORITY, funcName);
+        // Argc
+        String[] param2Tokens = paramTokens[1].trim().split(" ");
+        if ((param2Tokens.length != 2) || !param2Tokens[0].trim().equals("int"))
+            return null;
 
-        // Add additional parameters
-        if (1 < paramTokens.length) {
-            if (!validateAdditionalParameters(routine, paramTokens, 1))
-                return null;
-        }
+        // ...
+        if (!paramTokens[2].trim().equals("..."))
+            return null;
 
-        return routine;
+        return new Routine(RoutineType.ADMISSION_PRIORITY, funcName);
     }
 
     /**
      * Check if a Processing function has the correct signature
-     * E.g. unsigned long my_pro_prio(struct sk_buff *skb);
+     * E.g. unsigned long my_pro_prio(struct sk_buff *skb, int argc, ...);
      *
      * @param line Line of code
      * @return Valid Routine instance if its correct or null otherwise
@@ -716,28 +685,30 @@ public class OQGen {
 
         String params = tokens[0];
         String[] paramTokens = params.split(",");
-        if (paramTokens.length == 0)
+        if (paramTokens.length != 3)
             return null;
 
-        String[] param1Tokens = params.trim().split(" ");
+        // sk_buff*
+        String[] param1Tokens = paramTokens[0].trim().split(" ");
         if ((param1Tokens.length != 3) || !param1Tokens[0].trim().equals("struct") ||
                 !param1Tokens[1].trim().equals("sk_buff*"))
             return null;
 
-        Routine routine = new Routine(RoutineType.PROCESSING_PRIORITY, funcName);
+        // Argc
+        String[] param2Tokens = paramTokens[1].trim().split(" ");
+        if ((param2Tokens.length != 2) || !param2Tokens[0].trim().equals("int"))
+            return null;
 
-        // Add additional parameters
-        if (1 < paramTokens.length) {
-            if (!validateAdditionalParameters(routine, paramTokens, 1))
-                return null;
-        }
+        // ...
+        if (!paramTokens[2].trim().equals("..."))
+            return null;
 
-        return routine;
+        return new Routine(RoutineType.PROCESSING_PRIORITY, funcName);
     }
 
     /**
      * Check if a Scheduling function has the correct signature
-     * E.g. int my_schd_prio(struct Qdisc *sch);
+     * E.g. int my_schd_prio(struct Qdisc *sch, int argc, ...);
      *
      * @param line Line of code
      * @return Valid Routine instance if its correct or null otherwise
@@ -760,63 +731,25 @@ public class OQGen {
 
         String params = tokens[0];
         String[] paramTokens = params.split(",");
-        if (paramTokens.length == 0)
+        if (paramTokens.length != 3)
             return null;
 
-        String[] param1Tokens = params.trim().split(" ");
+        // Qdisc*
+        String[] param1Tokens = paramTokens[0].trim().split(" ");
         if ((param1Tokens.length != 3) || !param1Tokens[0].trim().equals("struct") ||
                 !param1Tokens[1].trim().equals("Qdisc*"))
             return null;
 
-        Routine routine = new Routine(RoutineType.SCHEDULING_PRIORITY, funcName);
+        // Argc
+        String[] param2Tokens = paramTokens[1].trim().split(" ");
+        if ((param2Tokens.length != 2) || !param2Tokens[0].trim().equals("int"))
+            return null;
 
-        // Add additional parameters
-        if (1 < paramTokens.length) {
-            if (!validateAdditionalParameters(routine, paramTokens, 1))
-                return null;
-        }
+        // ...
+        if (!paramTokens[2].trim().equals("..."))
+            return null;
 
-        return routine;
-    }
-
-    /**
-     * Validate and add additional parameters to the routine.
-     *
-     * @param routine Routine instance
-     * @param paramTokens Parameters
-     * @param startIndex Index where additional parameters start
-     * @return True if all parameters are validated fine or false otherwise
-     */
-    private boolean validateAdditionalParameters(Routine routine, String[] paramTokens, int startIndex) {
-        for (int i = startIndex; i < paramTokens.length; i++) {
-            String param = paramTokens[i].trim();
-
-            String[] tokens = param.split(" ");
-            if (tokens.length != 2)
-                return false;
-
-            switch (tokens[0]) {
-                case "bool":
-                    routine.setNextParamType(ParamType.BOOL);
-                    break;
-                case "char":
-                    routine.setNextParamType(ParamType.CHAR);
-                    break;
-                case "int":
-                    routine.setNextParamType(ParamType.INT);
-                    break;
-                case "long":
-                    routine.setNextParamType(ParamType.LONG);
-                    break;
-                case "double":
-                    routine.setNextParamType(ParamType.DOUBLE);
-                    break;
-                default:
-                    return false;
-            }
-        }
-
-        return true;
+        return new Routine(RoutineType.SCHEDULING_PRIORITY, funcName);
     }
 
     /**
@@ -843,20 +776,22 @@ public class OQGen {
     }
 
     /**
-     * Generate code
+     * Generate policy module code
      */
     private boolean generateCode() {
-        // Generate constants header file
-        String constFileName = "include/gen/oq_defines.h";
-        if (!generateDefines(constFileName)) {
-            showError("Error while generating file: " + constFileName, 0);
+        String modName = getModuleName(port.getName());
+        showInfo("Generating policy module " + modName + " (" + port.getName() + ") ...");
+
+        // Init module
+        if (!initModule(modName)) {
+            showError("Error while initializing policy module: " + modName, 0);
             return false;
         }
 
-        // Generate port initialization function
-        String initFileName = "qdisc/gen/oq_init_port.c";
-        if (!generateInitPort(initFileName)) {
-            showError("Error while generating file: " + constFileName, 0);
+        // Generate module code
+        String modFileName = "policy/" + modName + "/mod_" + modName + ".c";
+        if (!generateModule(modName, modFileName)) {
+            showError("Error while generating file: " + modFileName, 0);
             return false;
         }
 
@@ -864,130 +799,396 @@ public class OQGen {
     }
 
     /**
-     * Generate constants file
+     * Get qualified name of the module
      *
-     * @param fileName Name of the file
-     * @return true if successful or false otherwise
+     * @param name Port name as defined in the policy file
+     * @return Qualified name of the module
      */
-    private boolean generateDefines(String fileName) {
-        boolean status = false;
+    private String getModuleName(String name) {
+        String modName = "oqp_";
 
-        try {
-            BufferedWriter bw = new BufferedWriter(new FileWriter(new File(fileName)));
-
-            bw.write("/*\n" +
-                    " * oq_defines.h  OpenQueue constant declaration (Generated code).\n" +
-                    " *\n" +
-                    " *              This program is free software; you can redistribute it and/or\n" +
-                    " *              modify it under the terms of the GNU General Public License\n" +
-                    " *              as published by the Free Software Foundation; either version\n" +
-                    " *              2 of the License, or (at your option) any later version.\n" +
-                    " */\n" +
-                    "\n" +
-                    "#pragma once\n\n");
-
-            // Number of queues
-            bw.write("#define TCQ_OQ_NO_QUEUES ");
-            bw.write(Integer.toString(queues.size()));
-
-            // Function calls
-
-            bw.flush();
-            bw.close();
-
-            status = true;
-        } catch (IOException e) {
-            showError("Error while generating file: " + e.getMessage(), 0);
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            modName += Character.isUpperCase(c) ? ("_" + Character.toLowerCase(c)) : c;
         }
 
-        return status;
+        return modName;
     }
 
     /**
-     * Generate init file
+     * Initialize policy module. Create directory and Makefile.
      *
-     * @param fileName Name of the file
-     * @return true if successful or false otherwise
+     * @param modName Qualified name of module
+     * @return True if successful or false otherwise
      */
-    private boolean generateInitPort(String fileName) {
-        boolean status = false;
-
-        try {
-            BufferedWriter bw = new BufferedWriter(new FileWriter(new File(fileName)));
-
-            bw.write("/*\n" +
-                    " * oq_init_port.c  OpenQueue port initialization (Generated code).\n" +
-                    " *\n" +
-                    " *              This program is free software; you can redistribute it and/or\n" +
-                    " *              modify it under the terms of the GNU General Public License\n" +
-                    " *              as published by the Free Software Foundation; either version\n" +
-                    " *              2 of the License, or (at your option) any later version.\n" +
-                    " */\n\n");
-
-            bw.write("#include \"../include/sch_openqueue.h\"\n" +
-                    "#include \"../include/routine/routines.h\"\n" +
-                    "\n" +
-                    "extern int init_queue(struct oq_queue *queue, const char* name, int max_len, \n" +
-                    "               \t     oq_cong_func cong_fn, oq_cong_act_func cong_act_fn, \n" +
-                    "               \t     oq_admn_func admn_fn, oq_proc_func proc_fn);" +
-                    "\n\n");
-
-            bw.write("int init_port(struct oq_priv *priv)\n" +
-                    "{\n");
-
-            int i = 0;
-            for (Map.Entry<String, Queue> entry : queues.entrySet()) {
-                String name = entry.getKey();
-                Queue queue = entry.getValue();
-
-                String code = String.format("\tif (init_queue(&priv->queues[%d], \"%s\", %d, \n" +
-                        "\t\t%s, %s, %s, %s) != 0)\n" +
-                        "\t\treturn -ENOMEM;\n", i, name, queue.getSize(), queue.getCongestion().getName(),
-                        queue.getCongAction().getName(), queue.getAdmPrio().getName(), queue.getProcPrio().getName());
-
-                bw.write(code);
-
-                i++;
+    private boolean initModule(String modName) {
+        // Create policy directory if it does not exist
+        String policyDir = "policy/" + modName;
+        File dir = new File(policyDir);
+        if (!dir.exists()) {
+            if (!dir.mkdirs()) {
+                showError("Error while creating module directory: " + policyDir, 0);
+                return false;
             }
 
-            String str = String.format("\n" +
-                    "\tpriv->q_select = %s;\n" +
-                    "\tpriv->sched_fn = %s;\n" +
-                    "\tstrncpy(priv->port_name, \"%s\", TCQ_OQ_NAME_LEN);\n" +
-                    "\n", port.getQueueSelect().getName(), port.getSchedPrio().getName(), port.getName());
-            bw.write(str);
+            showInfo("Created policy directory \"" + policyDir + "\"");
+        }
 
+        // Create makefile
+        boolean status = false;
 
-            bw.write("\treturn 0;\n" +
-                    "}");
+        try {
+            String fileName = policyDir + "/Makefile";
+            BufferedWriter bw = new BufferedWriter(new FileWriter(new File(fileName)));
+
+            bw.write("obj-m += " + modName +".o\n" +
+                    modName + "-objs := mod_" + modName + ".o ../../routine/routines.o\n");
 
             bw.flush();
             bw.close();
 
             status = true;
         } catch (IOException e) {
-            showError("Error while generating file: " + e.getMessage(), 0);
+            showError("Error while generating Makefile: " + e.getMessage(), 0);
         }
 
         return status;
     }
 
     /**
-     * Show info log message
+     * Generate policy module source
+     *
+     * @param modName Module name
+     * @param fileName Filename of the policy module
+     * @return True if the module is generated successfully or false otherwise
+     */
+    private boolean generateModule(String modName, String fileName) {
+        boolean status = false;
+
+        try {
+            BufferedWriter bw = new BufferedWriter(new FileWriter(new File(fileName)));
+
+            // Header
+            bw.write(generateHeader(modName));
+            // Congestion function
+            bw.write(generateCongFn(modName));
+            // Congestion action function
+            bw.write(generateCongActFn(modName));
+            // Admission function
+            bw.write(generateAdmnFn(modName));
+            // Processing function
+            bw.write(generateProcFn(modName));
+            // Queue select function
+            bw.write(generateQselcFn(modName));
+            // Scheduling function
+            bw.write(generateSchdFn(modName));
+            // Init queue function
+            bw.write(generateInitQueueFn(modName));
+            // Init port function
+            bw.write(generateInitPortFn(modName));
+            // Footer
+            bw.write(generateFooter(modName));
+
+            bw.flush();
+            bw.close();
+
+            status = true;
+        } catch (IOException e) {
+            showError("Error while generating Makefile: " + e.getMessage(), 0);
+        }
+
+        return status;
+    }
+
+    /**
+     * Generate header code
+     *
+     * @param modName Module name
+     * @return Generated code
+     */
+    private String generateHeader(String modName) {
+        String code = "";
+
+        code += "/*\n" +
+                " * mod_" + modName + ".c    OpenQueue policy " + port.getName() + "\n" +
+                " *\n" +
+                " *                  This program is free software; you can redistribute it and/or\n" +
+                " *                  modify it under the terms of the GNU General Public License\n" +
+                " *                  as published by the Free Software Foundation; either version\n" +
+                " *                  2 of the License, or (at your option) any later version.\n" +
+                " *\n" +
+                " * Authors:         Danushka Menikkumbura, <dmenikku@purdue.edu>\n" +
+                " */\n" +
+                "\n" +
+                "#include <linux/module.h>\n" +
+                "#include <linux/kernel.h>\n" +
+                "#include <linux/init.h>\n" +
+                "#include <net/pkt_sched.h>\n" +
+                "\n" +
+                "#include \"../../include/qdisc/sch_openqueue.h\"\n" +
+                "#include \"../../include/routine/routines.h\"\n" +
+                "\n" +
+                "#define TCQ_OQ_NO_QUEUES\t" + queues.size() + "\n" +
+                "\n";
+
+        return code;
+    }
+
+    /**
+     * Generate congestion function
+     *
+     * @param modName Module name
+     * @return Generated code
+     */
+     private String generateCongFn(String modName) {
+         String code = "";
+
+         code += "/* Congestion condition*/\n" +
+                 "bool " + modName + "_cong_func(struct oq_queue *queue)\n" +
+                 "{\n" +
+                 "    bool cond = false;\n" +
+                 "\n";
+
+         for (Queue queue : queues.values()) {
+             code += "    if (strncmp(queue->name, \"" + queue.getName() +"\", TCQ_OQ_NAME_LEN) == 0)\n" +
+                     "        cond = " + queue.getCongestion().getStatement() + ";\n";
+         }
+
+         code += "\n" +
+                 "    return cond;\n" +
+                 "}\n\n";
+
+         return code;
+     }
+
+    /**
+     * Generate congestion action
+     *
+     * @param modName Module name
+     * @return Generated code
+     */
+    private String generateCongActFn(String modName) {
+        String code = "";
+
+        code += "/* Congestion action */\n" +
+                "int " + modName + "_cong_act_func(struct oq_queue *queue, struct sk_buff *skb)\n" +
+                "{\n" +
+                "    int status = 0;\n" +
+                "\n";
+
+        for (Queue queue : queues.values()) {
+            code += "    if (strncmp(queue->name, \"" + queue.getName() + "\", TCQ_OQ_NAME_LEN) == 0)\n" +
+                    "        status = " + queue.getCongAction().getStatement() + ";\n";
+        }
+
+        code += "\n" +
+                "    return status;\n" +
+                "}\n\n";
+
+        return code;
+    }
+
+    /**
+     * Generate admission function
+     *
+     * @param modName Module name
+     * @return Generated code
+     */
+    private String generateAdmnFn(String modName) {
+        String code = "";
+
+        code += "/* Admission priority */\n" +
+                "unsigned long " + modName + "_admn_func(struct oq_queue *queue, struct sk_buff *skb)\n" +
+                "{\n" +
+                "    unsigned long key = 0;\n" +
+                "\n";
+
+        for (Queue queue : queues.values()) {
+            code += "    if (strncmp(queue->name, \"" + queue.getName() +"\", TCQ_OQ_NAME_LEN) == 0)\n" +
+                    "        key = " + queue.getAdmPrio().getStatement() + ";\n";
+        }
+
+        code += "\n" +
+                "    return key;\n" +
+                "}\n\n";
+
+        return code;
+    }
+
+    /**
+     * Generate processing function
+     *
+     * @param modName Module name
+     * @return Generated code
+     */
+    private String generateProcFn(String modName) {
+        String code = "";
+
+        code += "/* Processing priority */\n" +
+                "unsigned long " + modName + "_proc_func(struct oq_queue *queue, struct sk_buff *skb)\n" +
+                "{\n" +
+                "    unsigned long key = 0;\n" +
+                "\n";
+
+        for (Queue queue : queues.values()) {
+            code += "    if (strncmp(queue->name, \"" + queue.getName() + "\", TCQ_OQ_NAME_LEN) == 0)\n" +
+                    "        key = " + queue.getProcPrio().getStatement() + ";\n";
+        }
+
+        code += "\n" +
+                "    return key;\n" +
+                "}\n\n";
+
+        return code;
+    }
+
+    /**
+     * Generate queue selection function
+     *
+     * @param modName Module name
+     * @return Generated code
+     */
+    private String generateQselcFn(String modName) {
+        String code = "";
+
+        code += "/* Queue selection priority */\n" +
+                "int " + modName +"_qselc_func(struct Qdisc *sch, struct sk_buff *skb)\n" +
+                "{\n" +
+                "    return " + port.getQueueSelect().getStatement() + ";\n" +
+                "}\n\n";
+
+        return code;
+    }
+
+    /**
+     * Generate scheduling function
+     *
+     * @param modName Module name
+     * @return Generated code
+     */
+    private String generateSchdFn(String modName) {
+        String code = "";
+
+        code += "/* Scheduling priority */\n" +
+                "int " + modName + "_schd_func(struct Qdisc *sch)\n" +
+                "{\n" +
+                "    return " + port.getSchedPrio().getStatement() + ";\n" +
+                "}\n\n";
+
+        return code;
+    }
+
+    /**
+     * Generate init queue function
+     *
+     * @param modName Module name
+     * @return Generated code
+     */
+    private String generateInitQueueFn(String modName) {
+        String code = "";
+
+        code += "/* Initialize queue */\n" +
+                "int init_queue(struct oq_queue *queue, const char* name, int max_len)\n" +
+                "{\n" +
+                "    if ((btree_init(&queue->admn_q) != 0) || (btree_init(&queue->proc_q) != 0))\n" +
+                "        return -1;\n" +
+                "\n" +
+                "    queue->max_len = max_len;\n" +
+                "    queue->len = 0;\n" +
+                "    queue->dropped = 0;\n" +
+                "    queue->total = 0;\n" +
+                "    strncpy(queue->name, name, TCQ_OQ_NAME_LEN);\n" +
+                "\n" +
+                "    return 0;\n" +
+                "}\n\n";
+
+        return code;
+    }
+
+    /**
+     * Generate init port function
+     *
+     * @param modName Module name
+     * @return Generated code
+     */
+    private String generateInitPortFn(String modName) {
+        String code = "";
+
+        code += "/* Initialize policy */\n" +
+                "int " + modName + "_init_port(struct oq_priv *priv)\n" +
+                "{\n";
+
+        int i = 0;
+        for (Queue queue : queues.values()) {
+            code += "    if (init_queue(&priv->queues[" + i +"], \"" + queue.getName() + "\", "
+                    + queue.getSize() +") != 0)\n" +
+                    "        return -ENOMEM;\n";
+            i++;
+        }
+
+        code += "\n" +
+                "    priv->num_q = TCQ_OQ_NO_QUEUES;\n" +
+                "    strncpy(priv->port_name, \"" + port.getName() + "\", TCQ_OQ_NAME_LEN);\n" +
+                "\n" +
+                "    priv->cong_fn = " + modName + "_cong_func;\n" +
+                "    priv->cong_act_fn = " + modName + "_cong_act_func;\n" +
+                "    priv->admn_fn = " + modName + "_admn_func;\n" +
+                "    priv->proc_fn = " + modName + "_proc_func;\n" +
+                "    priv->q_select = " + modName + "_qselc_func;\n" +
+                "    priv->sched_fn = " + modName + "_schd_func;\n" +
+                "\n" +
+                "    return 0;\n" +
+                "}\n\n";
+
+        return code;
+    }
+
+    /**
+     * Generate footer code
+     *
+     * @param modName Module name
+     * @return Generated code
+     */
+    private String generateFooter(String modName) {
+        String code = "";
+
+        code += "/* Initialize policy */\n" +
+                "static int __init " + modName + "_init(void)\n" +
+                "{\n" +
+                "    printk(KERN_INFO \"Registered OpenQueue policy " + modName + "\\n\");\n" +
+                "\n" +
+                "    return oq_register_policy(\""+ port.getName() +"\", " + modName + "_init_port);\n" +
+                "}\n" +
+                "\n" +
+                "/* Exit policy */\n" +
+                "static void __exit " + modName + "_exit(void)\n" +
+                "{\n" +
+                "    printk(KERN_INFO \"Unregistered OpenQueue policy " + modName + "\\n\");\n" +
+                "}\n" +
+                "\n" +
+                "module_init(" + modName + "_init);\n" +
+                "module_exit(" + modName + "_exit);\n" +
+                "MODULE_LICENSE(\"GPL\");\n";
+
+        return code;
+    }
+
+    /**
+     * Show info message
      *
      * @param msg Message to be shown
      */
     private static void showInfo(String msg) {
-        System.out.println("[Info] " + msg);
+        System.out.println("INFO| " + msg);
     }
 
     /**
-     * Show error log message
+     * Show error message
      *
      * @param msg Message to be shown
      * @param lineNumber Line number at which the error occurred
      */
     private static void showError(String msg, int lineNumber) {
-        System.out.println("[Error] " + msg + (lineNumber != 0 ? " (Line: " + lineNumber + ")" : ""));
+        System.out.println("ERROR| " + msg + (lineNumber != 0 ? " (Line: " + lineNumber + ")" : ""));
     }
 }

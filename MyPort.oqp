@@ -10,15 +10,16 @@ Queue q1 = Queue(128);
 Queue q2 = Queue(1024);
 
 // Attributes of q1
+q1.congestion = inline{Queue.len == 1024};
+// Drop with 85% probability
+q1.congAction = cong_act(0.85);
 q1.admPrio = my_adm_prio;
-q1.congestion = my_congestion_condition;
-q1.congAction = drop_tail;
 q1.procPrio = my_pro_prio;
 
 // Attributes of q2
-q2.admPrio = my_adm_prio;
 q2.congestion = my_congestion_condition;
-q2.congAction = drop_tail;
+q2.congAction = cong_act;
+q2.admPrio = my_adm_prio;
 q2.procPrio = my_pro_prio;
 
 // Create port
